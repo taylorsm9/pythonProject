@@ -1,11 +1,14 @@
 # used to parse config.ini
 import configparser
+import random
+
 import numpy
 import time
 # used to open images, convert images into arrays, and convert arrays into images. Not used for processing
 from PIL import Image
 # used for plotting figures and saving them as images
 import matplotlib.pyplot as plt
+import csv
 
 # to calculate weighted median, unfortunately not much faster than a naive implementation
 
@@ -393,15 +396,14 @@ def simpleErode(imArray, kernelSize, passes):
 
 
 def sobleEdge(imArray, prewittSkip, jahnneSkip):
-
     hkernel = [1, 0, -1, 2, 0, -2, 1, 0, -1]
     vkernel = [1, 2, 1, 0, 0, 0, -1, -2, -1]
     if prewittSkip == "1":
-        hkernel = [1,0,-1,2,0,-2,1,0,-1]
-        vkernel = [1,1,1,0,0,0,-1,-1,-1]
+        hkernel = [1, 0, -1, 2, 0, -2, 1, 0, -1]
+        vkernel = [1, 1, 1, 0, 0, 0, -1, -1, -1]
     if jahnneSkip == "1":
-        hkernel = [3,0,-3,10,0,-10,3,0,-3]
-        vkernel = [3,10,3,0,0,0,-3,-10,-3]
+        hkernel = [3, 0, -3, 10, 0, -10, 3, 0, -3]
+        vkernel = [3, 10, 3, 0, 0, 0, -3, -10, -3]
     # create copy of image array size to work on
     filtered = numpy.zeros_like(imArray)
     directionArray = numpy.zeros_like(imArray)
@@ -489,10 +491,160 @@ def otsu(imArray):
     for i in range(0, len(imArray)):
         for j in range(0, len(imArray[i])):
             if imArray[i][j] > currentThresh:
-                filtered[i][j] = 255
-            else:
                 filtered[i][j] = 0
+            else:
+                filtered[i][j] = 255
     return filtered
+
+
+def histogramOtsu(imArray):
+    histogramArray = histogram(imArray)
+    revHistogramArray = numpy.flip(histogramArray)
+    cumSum = numpy.cumsum(histogramArray)
+    filtered = numpy.zeros_like(imArray)
+    pixels = len(imArray) * len(imArray[0])
+    pixelWeight = 1.0 / pixels
+    currentThresh = -1
+    currentValue = -1
+    value = -1
+    # 256 total buckets, avoid dividing by 0
+    intensity = numpy.arange(256)
+    for i in range(1, 255):
+        sumForward = numpy.sum(histogramArray[i:])
+        sumReverse = numpy.sum(histogramArray[:i])
+
+        # this is just... extremely hacky. I don't know how other people avoid dividing by 0 in these cases, I have seen
+        # it not addressed at all in other implementations.
+        if sumForward == 0:
+            sumForward = .01
+        if sumReverse == 0:
+            sumReverse = .01
+
+        weightForward = sumForward * pixelWeight
+        weightReverse = sumReverse * pixelWeight
+
+        bgMean = numpy.sum((intensity[:i] * histogramArray[:i])) / float(sumReverse)
+        fgMean = numpy.sum((intensity[i:] * histogramArray[i:])) / float(sumForward)
+
+        value = weightForward * weightReverse * (bgMean - fgMean) ** 2
+        if value > currentValue:
+            currentThresh = i - 1
+            currentValue = value
+    foregroundHistogram = []
+    # otsu on image, modified to create new histogram
+    for i in range(0, len(imArray)):
+        for j in range(0, len(imArray[i])):
+            if imArray[i][j] > currentThresh:
+                filtered[i][j] = 0
+            else:
+                foregroundHistogram.append(imArray[i][j])
+    histogramArray = numpy.zeros(int(currentThresh) + 1, int)
+
+
+    for i in foregroundHistogram:
+        histogramArray[i] += 1
+
+    return histogramArray
+
+def histMean(histArray):
+    totalValues = 0
+    totalPixels = 0
+    for i in range(0, len(histArray)):
+        totalValues +=  (i * histArray[i])
+        totalPixels += histArray[i]
+    return totalValues/totalPixels
+
+def histVar(histArray, mean):
+    totalPixels = 0
+    totalValues = 0
+    for i in range(0, len(histArray)):
+        totalPixels += histArray[i]
+        totalValues += histArray[i] * ((i - mean)**2)
+    return totalValues/totalPixels
+
+
+
+def enumerate(imArray):
+    count = 0
+    filtered = numpy.zeros_like(imArray)
+    components = []
+    pixelStack = []
+    componentStack = []
+
+    # get coords of every white pixel that isn't a border pixel. We could skip this step but it would look sloppy
+    for i in range(1, len(imArray) - 2):
+        for j in range(1, len(imArray[0]) - 2):
+            # if foreground and unlabeled
+            if imArray[i][j] == 255:
+                # count +=1
+                # add count label to filtered array
+                pixelStack.append([i, j])
+
+    while len(pixelStack) > 0:
+        newComponent = []
+        if len(pixelStack) == 0:
+            break
+        # increment count to label new component
+        count += 1
+        index1 = pixelStack[0][0]
+        index2 = pixelStack[0][1]
+        del pixelStack[0]
+        if filtered[index1][index2] == 0:
+            # newComponent = [[index1, index2]]
+            # found new component, add the pixel to component stack
+            componentStack.append([index1, index2])
+            filtered[index1, index2] = count
+
+        # here, we look at neighbors of pixels of the new component pixel and add them to a component stack
+        # we mark off the ones we have already added in the "filtered" array
+        while len(componentStack) > 0:
+            y = componentStack[0][0]
+            x = componentStack[0][1]
+            del componentStack[0]
+            for i in range(y - 1, y + 2):
+                # we must include a break here because python does not have a goto function and creating a separate
+                # method for the nested loop would be sloppy
+                for j in range(x - 1, x + 2):
+                    if filtered[i][j] == 0 and imArray[i][j] == 255:
+                        # print(i, j)
+                        newComponent.append([i, j])
+                        #filtered[i][j] = count
+                        # avoid index out of bounds by not appending something with too few neighbors
+                        if (0 < i < len(imArray) - 2) and (0 < j < len(imArray[0]) - 2):
+                            componentStack.append([i, j])
+                    filtered[i][j] = 1
+            if len(componentStack) == 0:
+                components.append(newComponent)
+                break
+    components.sort(key=len, reverse=True)
+    return components
+
+
+# components are presorted
+def largestArea(components):
+    return len(components[0])
+
+
+def perimiter(imArray, components):
+    component = components[0]
+    border = 0
+    while len(component) > 0:
+        index1 = component[0][0]
+        index2 = component[0][1]
+        del (component[0])
+        # we use p to check if the pixel has been found to be a perimiter pixel for loop breaking purposes
+        p = False
+
+        for i in range(index1 - 1, index1 + 2):
+            if p:
+                break
+            for j in range(index2 - 1, index2 + 2):
+                if p:
+                    break
+                if imArray[i][j] == 0:
+                    p = True
+                    border += 1
+    return border
 
 
 # Fast matrix multiplication for euclidian distances between 2 arrays"
@@ -561,18 +713,102 @@ def kMeans(imArray, k, iterations, prevLoss=None):
             if difference < tolerance:
                 break
         prev_loss = loss
-        #track best loss
-        #decide to break early?
-
+        # track best loss
+        # decide to break early?
 
     for i in range(0, clusterIndices):
-        pixelValue = int(255/k) * i
+        pixelValue = int(255 / k) * i
         for j in range(0, clusterIndices[0]):
             # assign pixel values to filtered array at cluster indices
             filtered[clusterIndices[0][1]] = pixelValue
 
 
+def euclidianDistance(testValues, trainValues):
+    return numpy.linalg.norm(testValues - trainValues)
+
+def knn(trainSet, testSet, k):
+    positive = 0
+    negative = 0
+
+    # for each item in the test set
+    for n in range(0, len(testSet)):
+        count = 0
+        distances = []
+
+        # for each item in the train set
+        for m in range(0, len(trainSet)):
+
+            # slice our parameters from test and train
+            trainSlice = numpy.array(trainSet[m][1:5:1])
+            testSlice = numpy.array(testSet[n][1:5:1])
+
+            # get euclidian distance between our slices, save it along with class label
+            distance = euclidianDistance(testSlice, trainSlice)
+            tuple = [distance, trainSet[m][5]]
+            distances.append(tuple)
+
+        # sort our array of distance, tuple by distance, slice it by k, then sort by label
+        distances = sorted(distances)
+        labelArray = distances[0:k:1]
+        labelArray = sorted(labelArray, key=lambda tup: tup[1])
+
+        # we wish to know the index at which we observe a change in labels
+        # this will give us label counts while preserving indices to check for a tiebreaker
+        changeIndex = []
+        currentLabel = labelArray[0][1]
+        for i in range(1, len(labelArray)):
+            if labelArray[i][1] != currentLabel:
+                changeIndex.append(i)
+                currentLabel = labelArray[i][1]
+
+        voteCounts = []
+        # if a tie is possible
+        if len(changeIndex) > 0:
+
+            #get counts
+
+
+            #having no other index to compare to, we place the first vote count manually
+            voteCounts.append(changeIndex[0])
+            for i in range(1, len(changeIndex)):
+                voteCount = changeIndex[i] - changeIndex[i - 1]
+                voteCounts.append(voteCount)
+            #similarly, we place the last vote count manually
+            voteCounts.append(len(labelArray) - changeIndex[len(changeIndex) - 1])
+        else:
+            voteCounts.append(k)
+
+        # We do a weird loop to insert the vote count at index 0 of each tuple in our label list
+        # this will allow us to sort by vote count first and euclidian distance second, breaking ties
+        labelIndex = 0
+        for i in range(0, len(voteCounts)):
+            for j in range(0, voteCounts[i]):
+                labelArray[labelIndex].insert(0, voteCounts[i])
+                labelIndex += 1
+
+        # this loop exists because it is not possible to sort by reverse for 1 element and not reverse for another
+        # with inbuilt functions. we just multiply the euclidian distance by -1 so we can sort both vote count and distance
+        # by their largest values, breaking all possible ties.
+        for i in range(0, len(labelArray)):
+            labelArray[i][1] = labelArray[i][1] * -1
+
+        # sort the array reversed, since we want the largest label and lowest distance, and we multiplied distances by -1,
+        # the first index will always have the label of the closest distance item with the majority vote
+        labelArray = sorted(labelArray, reverse=True)
+        #print(labelArray)
+
+        # if label is correct
+        if labelArray[0][2] == testSet[n][5]:
+            positive += 1
+        else:
+            negative += 1
+    return positive, negative
+
+
+
 """In this section, we implement the user's settings from the ini file"""
+
+
 
 # parse config.ini for user settings
 config = configparser.ConfigParser()
@@ -582,12 +818,14 @@ config.read('config.ini')
 inputFolder = config["FILES"]['INPUT_FOLDER']
 outputFolder = config["FILES"]['OUTPUT_FOLDER']
 finalFolder = config["FILES"]['FINAL_FOLDER']
+otsuHistFolder = config["FILES"]['PART3_HIST_INPUT_FOLDER']
+areaFolder = config["FILES"]['PART3_AREA_INPUT_FOLDER']
+csvFolder = config["FILES"]['CSV_FOLDER']
 
 # filenames for i/o, saved as a list of lists for looping
 imageList = []
 cylList = config["FILES"]['CYL_LIST'].split(",")
 imageList.append(cylList)
-
 interList = config["FILES"]['INTER_LIST'].split(",")
 imageList.append(interList)
 letList = config["FILES"]['LET_LIST'].split(",")
@@ -600,6 +838,9 @@ superList = config["FILES"]['SUPER_LIST'].split(",")
 imageList.append(superList)
 svarList = config["FILES"]['SVAR_LIST'].split(",")
 imageList.append(svarList)
+
+# user k values
+userK = numpy.asarray(config['SETTINGS']['USER_K'].split(",")).astype(int)
 
 # import weights for single spectrum conversion and format as float array
 greyscaleWeights = numpy.asarray(config['SETTINGS']['GREYSCALE_WEIGHTS'].split(",")).astype(float)
@@ -659,9 +900,20 @@ otsuSkip = config['SKIPLIST']['OTSU_SKIP']
 kskip = config['SKIPLIST']['K_SKIP']
 jahnneSkip = config['SKIPLIST']['JAHNNE_SKIP']
 prewittSkip = config['SKIPLIST']['PREWITT_SKIP']
+partThree = config['SKIPLIST']['PART_THREE']
+partThree = config['SKIPLIST']['PART_THREE']
+partThreeKNN = config['SKIPLIST']['PART_THREE_KNN']
+
 # Set all time tracking variables to 0
 greyScaleTotal, spNoiseTotal, gaussianNoiseTotal, histogramTotal, \
 histogramNormTotal, quantTotal, medianTotal, linearTotal, msqeTotal = 0, 0, 0, 0, 0, 0, 0, 0, 0
+csvPath = csvFolder + "/" + 'knncsv.csv'
+
+
+
+
+
+
 
 if partOne == "1":
     # Outer loop loops through a list of lists (imageList), contains lists of filenames of image classes
@@ -843,3 +1095,153 @@ if partTwo == "1":
             # Save our edited image
             newImage = Image.fromarray(numpy.uint8(imageArray))
             newImage.save(finalFolder + "/" + fileName)
+
+if partThree == "1":
+    fieldnames = ["filename", "histMean", "histVar", "area", "perimeter"]
+
+    fullData = []
+    count = 0
+    for i in range(0, len(imageList)):
+    # Inner loop loops through filenames defined by the user in the ini file
+        # for fileName in imageList[i]:
+        for j in range(0, len(imageList[i])):
+            fileName = imageList[i][j]
+            label = fileName[0:3]
+            # open image using pillow and begin running methods based on user settings
+            histIm = Image.open(otsuHistFolder + "/" + fileName)
+            areaIm = Image.open(areaFolder + "/" + fileName)
+            histImArray = numpy.asarray(histIm)
+            areaImArray = numpy.asarray(areaIm)
+
+
+            otsuHistogram = (histogramOtsu(histImArray))
+            #print("hist done")
+            histM = histMean(otsuHistogram)
+            #print("histm done")
+            histV = histVar(otsuHistogram, histM)
+            #print("histv done")
+            components = enumerate(areaImArray)
+            #print("components done")
+            area = (largestArea(components))
+            #print("largestArea done")
+            perimeter = (perimiter(areaImArray, components))
+            #print("perimeter done")
+
+            data = [fileName, histM, histV, area, perimeter, label]
+            fullData.append(data)
+            count += 1
+            print(count)
+
+    with open(csvPath, 'w', newline='') as knnCSV:
+        writer = csv.writer(knnCSV, dialect='unix')
+        for i in range(0, len(fullData)):
+            writer.writerow(fullData[i])
+
+
+if partThreeKNN == "1":
+
+    # named for code clarity
+    cylArray = []
+    intArray = []
+    letArray = []
+    modArray = []
+    parArray = []
+    supArray = []
+    svaArray = []
+    fullArray = [cylArray, intArray, letArray, modArray, parArray, supArray, svaArray]
+
+    # these are used to put rows of our csv into subarrays in a bit of a hacky way
+    classCount = 0
+    className = "cyl"
+
+    # make a full array first to avoid reading too much python csv documentation
+    with open(csvPath, newline='') as knnCSV:
+        reader = csv.reader(knnCSV)
+        # cast values to int and float for mixed python list
+        for row in reader:
+            filenameValue = row[0]
+            histMeanValue = float(row[1])
+            histVarValue = float(row[2])
+            areaValue = int(row[3])
+            perimeterValue = int(row[4])
+            labelValue = row[5]
+            rowArray = [filenameValue, histMeanValue, histVarValue, areaValue, perimeterValue, labelValue]
+            if labelValue != className:
+                className = labelValue
+                classCount += 1
+            fullArray[classCount].append(rowArray)
+
+    # at this point we have the classes divided. We want to divide each class into 10 groups
+    # named for code clarity
+
+    groupOne = []
+    groupTwo = []
+    groupThree = []
+    groupFour = []
+    groupFive = []
+    groupSix = []
+    groupSeven = []
+    groupEight = []
+    groupNine = []
+    groupTen = []
+    groupArray = [groupOne, groupTwo, groupThree, groupFour, groupFive, groupSix, groupSeven, groupEight,
+                  groupNine, groupTen]
+    for i in range(0, len(fullArray)):
+        # floor divide (we will lose some data in mod as 1 image was corrupted
+        tenFold = len(fullArray[i])//10
+
+        for j in range (0, 10):
+            for n in range(0, tenFold):
+                randIndex = random.randrange(0, len(fullArray[i]))
+                groupArray[j].append(fullArray[i][randIndex])
+                del fullArray[i][randIndex]
+    # now that data is divided into 10 groups with equal class representation,
+    # we want to make test and train arrays to make code more readable
+    #this is not memory or time efficient at all but we have the space and time for it
+    # initialize arrays with 10 empty arrays each
+    testArray = [[], [], [], [], [], [], [], [], [], []]
+    trainArray = [[], [], [], [], [], [], [], [], [], []]
+
+    for i in range(0, 10):
+        testArray[i] = groupArray[i]
+        for j in range(0, 10):
+            if j != i:
+                for k in groupArray[j]:
+                    trainArray[i].append(k)
+    # cross validation groups complete, trainArray[i] corresponds with testArray[i]
+    totalPositive = 0
+    totalNegative = 0
+
+    plotTuples = []
+
+    for i in range(0, len(userK)):
+        for j in range(0, len(trainArray)):
+            positive, negative = knn(trainArray[j], testArray[j], userK[i])
+            totalPositive += positive
+            totalNegative += negative
+
+        accuracy = totalPositive/(totalPositive + totalNegative)
+        print("k = " + str(userK[i]) + " accuracy: " + str(accuracy))
+        plotTuples.append([userK[i], accuracy])
+
+    xVal = [x[0] for x in plotTuples]
+    yVal = [x[1] for x in plotTuples]
+    plt.plot(xVal, yVal)
+    plt.plot(xVal, yVal, 'or')
+    plt.title("Accuracy by K-value")
+    plt.xlabel("K value")
+    plt.ylabel("Accuracy")
+    plt.savefig(csvFolder + "/kPlot.png")
+    plt.show()
+    plt.close()
+
+
+
+
+
+
+
+
+
+
+
